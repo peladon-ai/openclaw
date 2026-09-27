@@ -9,6 +9,7 @@ import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import type { ModelCatalogEntry } from "../agents/model-catalog.types.js";
 import type { inspectLocalAudioSelection } from "../media-understanding/local-audio.js";
 import { registerCapabilityCli } from "./capability-cli.js";
+import { registerModelGatewayTests } from "./capability-cli.model-gateway.test-support.js";
 import { CAPABILITY_METADATA } from "./capability-cli/metadata.js";
 
 const PNG_1X1_BASE64 =
@@ -1615,35 +1616,12 @@ describe("capability cli", () => {
     },
   );
 
-  it("runs gateway model probes in fresh raw sessions without chat-agent prompt policy or tools", async () => {
-    await runCapability("model", "run", "--prompt", "hello", "--gateway", "--json");
-
-    const gatewayCall = firstGatewayCall();
-    const sessionId = gatewayCall?.params?.sessionId;
-    expect(gatewayCall?.method).toBe("agent");
-    expect(typeof sessionId).toBe("string");
-    if (typeof sessionId !== "string") {
-      throw new Error("expected gateway model run session id");
-    }
-    expect(sessionId).toEqual(expect.stringMatching(/^model-run-[0-9a-f-]{36}$/));
-    expect(gatewayCall?.params?.sessionKey).toBe(`agent:main:explicit:${sessionId}`);
-    expect(gatewayCall?.params?.cleanupBundleMcpOnRunEnd).toBe(true);
-    expect(gatewayCall?.params?.modelRun).toBe(true);
-    expect(gatewayCall?.params?.promptMode).toBe("none");
-
-    await runCapability("model", "run", "--prompt", "again", "--gateway", "--json");
-
-    const gatewayCalls = mocks.callGateway.mock.calls as unknown as Array<[GatewayCall]>;
-    const nextGatewayCall = gatewayCalls[1]?.[0];
-    const nextSessionId = nextGatewayCall?.params?.sessionId;
-    expect(nextGatewayCall?.method).toBe("agent");
-    expect(typeof nextSessionId).toBe("string");
-    if (typeof nextSessionId !== "string") {
-      throw new Error("expected second gateway model run session id");
-    }
-    expect(nextSessionId).toEqual(expect.stringMatching(/^model-run-[0-9a-f-]{36}$/));
-    expect(nextGatewayCall?.params?.sessionKey).toBe(`agent:main:explicit:${nextSessionId}`);
-    expect(nextSessionId).not.toBe(sessionId);
+  registerModelGatewayTests({
+    runCapability,
+    mocks,
+    firstGatewayCall,
+    firstJsonOutput,
+    expectRuntimeErrorContains,
   });
 
   it("surfaces gateway model fallback attempts in model probe JSON", async () => {

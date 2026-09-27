@@ -153,6 +153,9 @@ Notes:
 - `model run --prompt` must contain non-whitespace text; empty prompts are rejected before any provider or Gateway call.
 - Local `model run` exits non-zero when the provider returns no text output, so unreachable providers and empty completions do not look like successful probes.
 - Use `model run --gateway` to test Gateway routing or agent-runtime setup while keeping the model input raw. Use [`openclaw agent`](/cli/agent) or a chat surface for full agent context, tools, memory, and session transcript.
+- Gateway runs accept `--timeout-ms <ms>` (integer 1–3600000, default 120000) to bound the CLI wait for the final response. This does not cancel remote work or change the agent execution deadline.
+- Gateway runs accept `--request-id <uuid>` to set both the run idempotency key and the isolated `model-run-<uuid>` session identity. A generated UUID is used otherwise. Before dispatch, a `model.run.request` JSON diagnostic on stderr records the request ID, session ID/key, and deadline without the prompt; stdout remains reserved for results.
+- A timeout or disconnect leaves the remote outcome unknown. Do not automatically resubmit, including with the same ID: deduplication is not a durable exactly-once guarantee. Inspect the original run with `openclaw gateway call agent.wait --params '{"runId":"<uuid>","timeoutMs":1000}'` and its recorded session. A wait timeout is not proof that the run stopped, and status lookup does not recover the original response text. Both new options require `--gateway`.
 - `--thinking adaptive` maps to the completion-runtime level `medium`; `--thinking max` maps to `max` for OpenAI models that support the native max effort, otherwise `xhigh`.
 - `model auth login`, `model auth logout`, and `model auth status` manage saved provider auth state.
 

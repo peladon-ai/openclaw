@@ -31,6 +31,8 @@ export const CAPABILITY_METADATA: CapabilityMetadata[] = [
       "--file",
       "--model",
       "--thinking",
+      "--timeout-ms",
+      "--request-id",
       "--local",
       "--gateway",
       "--agent",
