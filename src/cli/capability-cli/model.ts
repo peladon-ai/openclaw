@@ -32,7 +32,7 @@ import {
 } from "../../auto-reply/thinking.shared.js";
 import { getRuntimeConfig } from "../../config/config.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
-import { callGateway, randomIdempotencyKey } from "../../gateway/call.js";
+import { callGateway } from "../../gateway/call.js";
 import { ADMIN_SCOPE } from "../../gateway/operator-scopes.js";
 import { convertHeicToJpeg } from "../../media/media-services.js";
 import { defaultRuntime } from "../../runtime.js";
@@ -102,6 +102,33 @@ function requireModelRunPrompt(value: unknown): string {
   return value;
 }
 
+function parseModelRunTimeout(value: unknown): number {
+  if (value === undefined) {
+    return 120_000;
+  }
+  if (typeof value !== "string" || !/^[0-9]+$/.test(value)) {
+    throw new Error("--timeout-ms must be an integer from 1 to 3600000.");
+  }
+  const timeoutMs = Number(value);
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 3_600_000) {
+    throw new Error("--timeout-ms must be an integer from 1 to 3600000.");
+  }
+  return timeoutMs;
+}
+
+function parseModelRunRequestId(value: unknown): string | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (
+    typeof value !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)
+  ) {
+    throw new Error("--request-id must be a UUID.");
+  }
+  return value.toLowerCase();
+}
+
 type ModelRunImageFile = {
   path: string;
   fileName: string;
@@ -168,7 +195,9 @@ async function runModelRun(params: {
   thinking?: ThinkLevel;
   transport: CapabilityTransport;
   agent?: string;
-}) {
+  timeoutMs: number;
+  requestId?: string;
+}): Promise<CapabilityEnvelope> {
   const explicitModelOverride = requireProviderModelOverride(params.model);
   const cfg =
     params.transport === "local"
@@ -299,8 +328,19 @@ async function runModelRun(params: {
   // Provider/model overrides require trusted-operator scope. Use the backend
   // shared-secret lane so local gateway smokes do not depend on paired CLI device scopes.
   const hasModelOverride = Boolean(provider || model);
-  const sessionId = `model-run-${randomUUID()}`;
+  const requestId = params.requestId ?? randomUUID();
+  const sessionId = `model-run-${requestId}`;
   const sessionKey = buildExplicitSessionIdSessionKey({ agentId, sessionId });
+  // Keep stdout reserved for the result; expose identity before the outcome can become unknown.
+  defaultRuntime.error(
+    JSON.stringify({
+      event: "model.run.request",
+      requestId,
+      sessionId,
+      sessionKey,
+      timeoutMs: params.timeoutMs,
+    }),
+  );
   const response: {
     result?: {
       payloads?: Array<{ text?: string; mediaUrl?: string | null; mediaUrls?: string[] }>;
@@ -334,10 +374,10 @@ async function runModelRun(params: {
       modelRun: true,
       promptMode: "none",
       cleanupBundleMcpOnRunEnd: true,
-      idempotencyKey: randomIdempotencyKey(),
+      idempotencyKey: requestId,
     },
     expectFinal: true,
-    timeoutMs: 120_000,
+    timeoutMs: params.timeoutMs,
     clientName: hasModelOverride ? GATEWAY_CLIENT_NAMES.GATEWAY_CLIENT : GATEWAY_CLIENT_NAMES.CLI,
     mode: hasModelOverride ? GATEWAY_CLIENT_MODES.BACKEND : GATEWAY_CLIENT_MODES.CLI,
     ...(hasModelOverride ? { scopes: [ADMIN_SCOPE] } : {}),
@@ -477,6 +517,11 @@ export function registerModelCapabilityCommands(capability: Command): void {
     .option("--file <path>", "Image file", collectOption, [])
     .option("--model <provider/model>", "Model override")
     .option("--thinking <level>", "Thinking level override")
+    .option("--timeout-ms <ms>", "Gateway response deadline, 1–3600000 ms (default: 120000)")
+    .option(
+      "--request-id <uuid>",
+      "Gateway request identity for reconciliation (default: generated UUID)",
+    )
     .option("--local", "Force local execution", false)
     .option("--gateway", "Force gateway execution", false)
     .option(
@@ -494,6 +539,14 @@ export function registerModelCapabilityCommands(capability: Command): void {
           supported: ["local", "gateway"],
           defaultTransport: "local",
         });
+        if (
+          transport !== "gateway" &&
+          (opts.timeoutMs !== undefined || opts.requestId !== undefined)
+        ) {
+          throw new Error("--timeout-ms and --request-id require --gateway.");
+        }
+        const timeoutMs = parseModelRunTimeout(opts.timeoutMs);
+        const requestId = parseModelRunRequestId(opts.requestId);
         const result = await runModelRun({
           prompt,
           agent: resolveCapabilityAgentOption(command, opts.agent),
@@ -501,6 +554,8 @@ export function registerModelCapabilityCommands(capability: Command): void {
           model: opts.model as string | undefined,
           thinking,
           transport,
+          timeoutMs,
+          requestId,
         });
         emitJsonOrText(defaultRuntime, Boolean(opts.json), result, formatEnvelopeForText);
       });
