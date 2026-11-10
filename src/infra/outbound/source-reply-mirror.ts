@@ -371,6 +371,7 @@ type SourceReplyMatch = boolean | (() => Promise<boolean>);
 function resolveOwnerCurrentConversationMatch(
   params: SourceReplyTranscriptMirrorParams,
   allowAsync: boolean,
+  actionParams: readonly Record<string, unknown>[] = [params.actionParams],
 ): SourceReplyMatch | undefined {
   const toolContext = params.toolContext;
   if (!toolContext) {
@@ -408,9 +409,18 @@ function resolveOwnerCurrentConversationMatch(
     if (!isRegistrationCurrent()) {
       return false;
     }
-    return async () => (await matchAsync(matchParams)) && isRegistrationCurrent();
+    return async () => {
+      for (const args of actionParams) {
+        if (!(await matchAsync({ ...matchParams, args })) || !isRegistrationCurrent()) {
+          return false;
+        }
+      }
+      return true;
+    };
   }
-  return aliasSpec.matchesCurrentConversation?.(matchParams) === true;
+  return actionParams.every(
+    (args) => aliasSpec.matchesCurrentConversation?.({ ...matchParams, args }) === true,
+  );
 }
 
 function resolveDeliveredThreadPlacementSourceReply(
@@ -431,35 +441,73 @@ function resolveDeliveredThreadPlacementSourceReply(
   return resolveOwnerCurrentConversationMatch(params, allowAsync) ?? false;
 }
 
+function resolveDeliveredOwnerSendSourceReply(
+  params: SourceReplyTranscriptMirrorParams,
+  delivery: ReturnType<typeof projectPluginMessageDeliveryFact>,
+  allowAsync: boolean,
+): SourceReplyMatch {
+  if (
+    params.action !== "send" ||
+    !hasCurrentSourceContext(params) ||
+    delivery?.status !== "settled" ||
+    delivery.partialDelivery ||
+    !delivery.primaryPlatformMessageId ||
+    delivery.primaryPlatformMessageId.toLowerCase() === "unknown"
+  ) {
+    return false;
+  }
+  const receipt = resolveDeliveryReceipt(params);
+  const threadIds = [
+    receipt?.threadId,
+    ...(Array.isArray(receipt?.parts) ? receipt.parts.map((part) => asRecord(part)?.threadId) : []),
+  ]
+    .map(normalizeOptionalString)
+    .filter((threadId): threadId is string => threadId !== undefined);
+  // The bundled owner must prove both the request and every physical recipient.
+  // This fallback grants completion only, never transcript/restart-receipt ownership.
+  return (
+    resolveOwnerCurrentConversationMatch(params, allowAsync, [
+      params.actionParams,
+      ...(delivery.deliveredTargets ?? []).map((target) => ({ target })),
+      ...threadIds.map((target) => ({ target })),
+    ]) ?? false
+  );
+}
+
 function resolveDeliveredCurrentSourceReply(
   params: SourceReplyTranscriptMirrorParams,
   allowAsync: boolean,
 ): SourceReplyMatch {
   const deliveryFact = projectPluginMessageDeliveryFact(params.deliveredPayload);
-  if (
-    (deliveryFact && deliveryFact.status !== "settled") ||
-    !matchesDeliveredSourceTargets(params, deliveryFact)
-  ) {
+  if (deliveryFact && deliveryFact.status !== "settled") {
     return false;
   }
+  const deliveredTargetsMatch = matchesDeliveredSourceTargets(params, deliveryFact);
   switch (params.action.trim().toLowerCase()) {
     case "react":
       return (
+        deliveredTargetsMatch &&
         params.sourceReplyFinal === true &&
         params.actionParams.remove !== true &&
         Boolean(normalizeOptionalString(params.actionParams.emoji)) &&
         isDeliveredCurrentSourceReplyAction(params)
       );
     case "reply":
-      return isDeliveredCurrentSourceReplyAction(params);
+      return deliveredTargetsMatch && isDeliveredCurrentSourceReplyAction(params);
     case "thread-reply":
-      return resolveDeliveredThreadPlacementSourceReply(params, allowAsync);
+      return (
+        deliveredTargetsMatch && resolveDeliveredThreadPlacementSourceReply(params, allowAsync)
+      );
     default:
       // Send variants share destination proof, not transcript or restart-receipt ownership.
-      return (
+      if (
+        deliveredTargetsMatch &&
         (isMessageToolSendActionName(params.action) || params.action === "poll") &&
         isCurrentSourceConversation({ ...params, action: "send" }, true)
-      );
+      ) {
+        return true;
+      }
+      return resolveDeliveredOwnerSendSourceReply(params, deliveryFact, allowAsync);
   }
 }
 

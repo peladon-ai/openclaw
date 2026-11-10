@@ -4,17 +4,20 @@ import type {
   ChannelMessageActionName,
   ChannelMessageToolDiscovery,
   ChannelMessageToolSchemaContribution,
+  ChannelThreadingToolContext,
 } from "openclaw/plugin-sdk/channel-contract";
 import type { DiscordActionConfig } from "openclaw/plugin-sdk/config-contracts";
 import { createLazyRuntimeModule } from "openclaw/plugin-sdk/lazy-runtime";
 import {
   asNonArrayRecord,
   normalizeOptionalString,
+  normalizeOptionalStringifiedId,
 } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { extractToolSend } from "openclaw/plugin-sdk/tool-send";
 import { Type } from "typebox";
 import { inspectDiscordAccount } from "./account-inspect.js";
 import { createDiscordActionGate, listDiscordAccountIds } from "./accounts.js";
+import { matchesDiscordActiveTurnThreadRoute } from "./active-turn-thread-route.js";
 import { coerceDiscordComponentParam, readDiscordComponentSpec } from "./components.js";
 import { withDiscordInboundEventDeliveryMetadata } from "./inbound-event-delivery.js";
 import { matchesDiscordToolContextTarget, normalizeDiscordMessagingTarget } from "./normalize.js";
@@ -52,6 +55,54 @@ function resolveDiscordThreadReplyTarget(args: Record<string, unknown>): string 
         normalizeOptionalString(args.to) ??
         normalizeOptionalString(args.target));
   return target ? normalizeDiscordMessagingTarget(target) : undefined;
+}
+
+function matchesDiscordAdoptedThreadSend(params: {
+  args: Record<string, unknown>;
+  accountId: string;
+  toolContext: ChannelThreadingToolContext;
+}): boolean {
+  const { args, accountId, toolContext } = params;
+  const sourceMessageId = normalizeOptionalStringifiedId(toolContext.currentMessageId);
+  if (
+    toolContext.currentChannelProvider?.trim().toLowerCase() !== "discord" ||
+    toolContext.currentThreadTs ||
+    !sourceMessageId ||
+    args.topLevel === true
+  ) {
+    return false;
+  }
+  try {
+    const source = normalizeDiscordMessagingTarget(
+      toolContext.currentChannelId ?? toolContext.currentMessagingTarget ?? "",
+    );
+    const targets = [args.target, args.to, args.channelId]
+      .map(normalizeOptionalString)
+      .filter((target): target is string => target !== undefined)
+      .map(normalizeDiscordMessagingTarget);
+    const target = targets[0];
+    if (
+      !source?.startsWith("channel:") ||
+      !target?.startsWith("channel:") ||
+      !targets.every((candidate) => candidate === target) ||
+      ["threadId", "messageThreadId"].some(
+        (key) =>
+          Object.hasOwn(args, key) &&
+          `channel:${normalizeOptionalStringifiedId(args[key])}` !== target,
+      )
+    ) {
+      return false;
+    }
+    return matchesDiscordActiveTurnThreadRoute({
+      accountId,
+      sourceChannelId: source.slice("channel:".length),
+      sourceMessageId,
+      threadId: target.slice("channel:".length),
+    });
+  } catch {
+    // Receipt classification after an accepted send must not trigger a resend.
+    return false;
+  }
 }
 
 const loadDiscordChannelActionsRuntime = createLazyRuntimeModule(
@@ -199,6 +250,10 @@ export const discordMessageActions: ChannelMessageActionAdapter = {
   describeMessageTool: describeDiscordMessageTool,
   supportsAction: ({ action }) => action !== "poll",
   messageActionTargetAliases: {
+    send: {
+      aliases: [],
+      matchesCurrentConversation: matchesDiscordAdoptedThreadSend,
+    },
     "thread-reply": {
       aliases: ["threadId"],
       deliveryTargetAliases: ["threadId"],

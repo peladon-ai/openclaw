@@ -1,7 +1,13 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { resetPluginRuntimeStateForTest, setActivePluginRegistry } from "../../plugins/runtime.js";
+import {
+  createChannelTestPluginBase,
+  createTestRegistry,
+} from "../../test-utils/channel-plugins.js";
 import {
   beginTerminalSourceReplyDelivery,
   isDeliveredCurrentSourceReply,
+  isDeliveredCurrentSourceReplyAsync,
   mirrorDeliveredSourceReplyToTranscript,
   reconcileTerminalSourceReplyDelivery,
 } from "./source-reply-mirror.js";
@@ -99,6 +105,88 @@ beforeEach(() => {
   channelPluginMocks.getChannelPlugin.mockReset();
   channelPluginMocks.getLoadedChannelPlugin.mockReset();
   transcriptMocks.append.mockClear();
+});
+
+describe("bundled-owner adopted send completion", () => {
+  afterEach(() => resetPluginRuntimeStateForTest());
+
+  it.each([
+    { mode: "confirmed send", expected: true },
+    { mode: "ambiguous send", expected: false },
+    { mode: "placeholder ID", expected: false },
+    { mode: "failed send", expected: false },
+    { mode: "partial send", expected: false },
+    { mode: "dry run", expected: false },
+    { mode: "untrusted plugin", expected: false },
+    { mode: "contradictory recipient", expected: false },
+    { mode: "contradictory thread", expected: false },
+    { mode: "mixed physical threads", expected: false },
+  ])(
+    "accepts completion without widening mirror ownership for $mode",
+    async ({ mode, expected }) => {
+      const plugin = {
+        ...createChannelTestPluginBase({ id: "discord" }),
+        actions: {
+          messageActionTargetAliases: {
+            send: {
+              aliases: [],
+              matchesCurrentConversation: ({ args }: { args: Record<string, unknown> }) =>
+                args.target === "adopted-thread",
+            },
+          },
+        },
+      };
+      setActivePluginRegistry(
+        createTestRegistry([
+          {
+            pluginId: "discord",
+            plugin,
+            source: "test",
+            origin: mode === "untrusted plugin" ? "workspace" : "bundled",
+          },
+        ]),
+      );
+      const params = source("discord", "parent-room", {
+        actionParams: { target: "adopted-thread", message: "Completed the request." },
+        sourceReplyFinal: true,
+        toolCallId: "call-1",
+        sessionId: "session-1",
+        toolContext: {
+          currentChannelProvider: "discord",
+          currentChannelId: "parent-room",
+          currentMessageId: "inbound-1",
+          currentSourceTurnId: "source-turn-1",
+        },
+        deliveredPayload: {
+          ok: mode !== "failed send",
+          ...(mode === "ambiguous send"
+            ? {}
+            : {
+                messageId: mode === "placeholder ID" ? "unknown" : "sent-1",
+              }),
+          channelId: mode === "contradictory recipient" ? "other-room" : "adopted-thread",
+          ...(mode === "partial send" ? { sentBeforeError: true } : {}),
+          ...(mode === "dry run" ? { dryRun: true } : {}),
+          ...(mode === "contradictory thread" ? { receipt: { threadId: "other-room" } } : {}),
+          ...(mode === "mixed physical threads"
+            ? {
+                receipt: {
+                  parts: [
+                    { platformMessageId: "sent-1", threadId: "adopted-thread" },
+                    { platformMessageId: "sent-2", threadId: "other-room" },
+                  ],
+                },
+              }
+            : {}),
+        },
+      });
+      expect(isDeliveredCurrentSourceReply(params)).toBe(expected);
+      await expect(isDeliveredCurrentSourceReplyAsync(params)).resolves.toBe(expected);
+      await expect(mirrorDeliveredSourceReplyToTranscript(params)).resolves.toBe(false);
+      await expect(beginTerminalSourceReplyDelivery(params)).resolves.toBeUndefined();
+      expect(transcriptMocks.append).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe("source reply receipts", () => {
