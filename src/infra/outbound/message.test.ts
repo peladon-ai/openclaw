@@ -3,6 +3,7 @@
 import { createRequireRecord } from "openclaw/plugin-sdk/test-fixtures";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChannelPlugin } from "../../channels/plugins/types.public.js";
+import type { OutboundPayloadDeliveryOutcome } from "./deliver-types.js";
 
 const mocks = vi.hoisted(() => ({
   getChannelPlugin: vi.fn(),
@@ -546,6 +547,34 @@ describe("sendMessage", () => {
       expect(() => JSON.stringify(result)).not.toThrow();
     },
   );
+
+  it.each([
+    { reason: "adapter_returned_no_identity", partial: true },
+    { reason: "cancelled_by_message_sending_hook", partial: false },
+  ] as const)("preserves mixed-payload progress for $reason", async ({ reason, partial }) => {
+    const delivered = { channel: "forum", messageId: "m2" };
+    mocks.deliverOutboundPayloads.mockImplementationOnce(
+      async (params: {
+        onPayloadDeliveryOutcome?: (outcome: OutboundPayloadDeliveryOutcome) => void;
+      }) => {
+        params.onPayloadDeliveryOutcome?.({ index: 0, status: "suppressed", reason });
+        params.onPayloadDeliveryOutcome?.({ index: 1, status: "sent", results: [delivered] });
+        return [delivered];
+      },
+    );
+
+    const result = await sendMessage({
+      cfg: {},
+      channel: "forum",
+      to: "123456",
+      content: "visible after an omitted payload",
+      payloads: [{ text: "first" }, { text: "second" }],
+    });
+
+    expect(result.deliveryStatus).toBe("sent");
+    expect(result.result).toEqual(delivered);
+    expect(result.sentBeforeError === true).toBe(partial);
+  });
 
   it("does not throw best-effort direct send failures but reports the failure", async () => {
     mocks.deliverOutboundPayloads.mockImplementationOnce(async (params: unknown) => {

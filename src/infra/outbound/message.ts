@@ -417,11 +417,27 @@ export async function sendMessage(params: MessageSendParams): Promise<MessageSen
     }
     const results = send.status === "sent" || send.status === "partial_failed" ? send.results : [];
     const payloadOutcomes = serializeDurableMessagePayloadOutcomes(send.payloadOutcomes);
-    const sentBeforeError = send.status !== "sent" && sendMayHaveReachedRecipient;
+    // A retained ID proves progress, not completion of every physical send.
+    // Keep the existing partial-progress signal before serializing away that evidence.
+    const incompleteDelivery = send.payloadOutcomes?.some((outcome) =>
+      outcome.status === "sent"
+        ? outcome.incompleteReason !== undefined
+        : outcome.status === "suppressed" && outcome.reason === "adapter_returned_no_identity",
+    );
+    const sentBeforeError =
+      (send.status !== "sent" || incompleteDelivery === true) && sendMayHaveReachedRecipient;
+    const lastResult = results.at(-1);
+    // Preserve every retained recipient/thread, not just the last chunk's placement.
+    const result =
+      lastResult &&
+      results.length > 1 &&
+      (send.status === "sent" || send.status === "partial_failed")
+        ? { ...lastResult, receipt: send.receipt }
+        : lastResult;
 
     return {
       ...baseResult,
-      result: results.at(-1),
+      result,
       deliveryStatus: send.status,
       ...(send.status === "suppressed" ? { suppressionReason: send.reason } : {}),
       ...(send.status === "failed" || send.status === "partial_failed"

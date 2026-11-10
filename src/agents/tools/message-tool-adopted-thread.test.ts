@@ -38,29 +38,55 @@ describe("core message sends into an adopted source thread", () => {
     { mode: "failed send", completes: false },
     { mode: "progress", completes: false },
     { mode: "dry run", completes: false },
+    { mode: "all chunks identified", completes: true },
+    { mode: "first chunk missing identity", completes: false },
+    { mode: "last chunk missing identity", completes: false },
+    { mode: "first chunk not sent", completes: false },
+    { mode: "first chunk wrong recipient", completes: false },
+    { mode: "first chunk wrong thread", completes: false },
   ])(
     "keeps one-send finalization and missing-reply recovery for $mode",
     async ({ mode, completes }) => {
+      const chunked = mode.includes("chunk");
+      let physicalSendCount = 0;
       const sendText = vi.fn(async ({ to }: { to: string }) => {
+        physicalSendCount += 1;
         if (mode === "failed send") {
           throw new Error("synthetic provider failure");
         }
-        const recipient = mode === "contradictory recipient" ? "other-room" : to;
+        const recipient =
+          mode === "contradictory recipient" ||
+          (mode === "first chunk wrong recipient" && physicalSendCount === 1)
+            ? "other-room"
+            : to;
+        const notSent = mode === "first chunk not sent" && physicalSendCount === 1;
+        const messageId =
+          notSent ||
+          (mode === "first chunk missing identity" && physicalSendCount === 1) ||
+          (mode === "last chunk missing identity" && physicalSendCount === 2)
+            ? ""
+            : `outbound-${physicalSendCount}`;
         return {
           channel: "workspace",
-          messageId: "outbound-1",
+          ...(notSent ? { outcome: "not_sent" as const } : {}),
+          messageId,
           target: { kind: "channel" as const, id: recipient },
           receipt: {
-            platformMessageIds: ["outbound-1"],
-            parts: [
-              {
-                platformMessageId: "outbound-1",
-                kind: "text" as const,
-                index: 0,
-                raw: { channelId: recipient },
-                ...(mode === "mixed physical threads" ? { threadId: "other-room" } : {}),
-              },
-            ],
+            platformMessageIds: messageId ? [messageId] : [],
+            parts: messageId
+              ? [
+                  {
+                    platformMessageId: messageId,
+                    kind: "text" as const,
+                    index: 0,
+                    raw: { channelId: recipient },
+                    ...(mode === "mixed physical threads" ||
+                    (mode === "first chunk wrong thread" && physicalSendCount === 1)
+                      ? { threadId: "other-room" }
+                      : {}),
+                  },
+                ]
+              : [],
             sentAt: 1,
           },
         };
@@ -76,7 +102,16 @@ describe("core message sends into an adopted source thread", () => {
             normalizeTarget: (target) => target.replace(/^channel:/u, ""),
             targetResolver: { looksLikeId: () => true },
           },
-          outbound: { deliveryMode: "direct", sendText },
+          outbound: {
+            deliveryMode: "direct",
+            sendText,
+            ...(chunked
+              ? {
+                  textChunkLimit: 10,
+                  chunker: (text) => [text.slice(0, 10), text.slice(10)],
+                }
+              : {}),
+          },
         }),
         config: {
           listAccountIds: () => ["default"],
@@ -171,7 +206,7 @@ describe("core message sends into an adopted source thread", () => {
         }
         expect(operation.sourceReplyDelivered).toBe(completes);
         expect(handleAction).not.toHaveBeenCalled();
-        expect(sendText).toHaveBeenCalledTimes(mode === "dry run" ? 0 : 1);
+        expect(sendText).toHaveBeenCalledTimes(mode === "dry run" ? 0 : chunked ? 2 : 1);
         if (mode === "mirror failed") {
           expect(mirror).toHaveBeenCalled();
         }
@@ -204,7 +239,7 @@ describe("core message sends into an adopted source thread", () => {
           settledTurnFinalizationAvailable: true,
         });
         expect(finalization === null).toBe(completes);
-        expect(sendText).toHaveBeenCalledTimes(mode === "dry run" ? 0 : 1);
+        expect(sendText).toHaveBeenCalledTimes(mode === "dry run" ? 0 : chunked ? 2 : 1);
       } finally {
         mirror.mockRestore();
         operation.complete();
