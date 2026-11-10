@@ -1,3 +1,4 @@
+import { normalizeAccountId } from "openclaw/plugin-sdk/account-id";
 import { normalizeOptionalString as normalizeId } from "openclaw/plugin-sdk/string-coerce-runtime";
 type ActiveDiscordTurnThreadRoute = {
   accountId?: string;
@@ -28,6 +29,25 @@ export function beginDiscordActiveTurnThreadRoute(
       activeRoutes.delete(key);
     }
   };
+}
+
+/** Read-only completion proof; adoption alone never records a delivered reply. */
+export function matchesDiscordActiveTurnThreadRoute(params: {
+  accountId: string;
+  sourceChannelId: string;
+  sourceMessageId: string;
+  threadId: string;
+}): boolean {
+  const accountId = normalizeAccountId(params.accountId);
+  return Array.from(activeRoutes.values()).some((routes) =>
+    Array.from(routes).some(
+      (route) =>
+        normalizeAccountId(route.accountId) === accountId &&
+        route.sourceChannelId === params.sourceChannelId &&
+        route.sourceMessageId === params.sourceMessageId &&
+        route.adoptedThreadId === params.threadId,
+    ),
+  );
 }
 
 export async function notifyDiscordActiveTurnThreadCreated(params: {

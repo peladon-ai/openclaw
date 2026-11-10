@@ -52,6 +52,8 @@ vi.spyOn(handleActionModule, "handleDiscordMessageAction").mockImplementation(
   handleDiscordMessageActionMock,
 );
 const { discordMessageActions } = await import("./channel-actions.js");
+const { beginDiscordActiveTurnThreadRoute, notifyDiscordActiveTurnThreadCreated } =
+  await import("./active-turn-thread-route.js");
 
 type DiscordDiscovery = ReturnType<NonNullable<typeof discordMessageActions.describeMessageTool>>;
 function schemaForAction(discovery: DiscordDiscovery, action: string) {
@@ -62,6 +64,68 @@ function schemaForAction(discovery: DiscordDiscovery, action: string) {
 }
 
 describe("discordMessageActions", () => {
+  it.each([
+    { name: "confirmed adoption", expected: true },
+    { name: "failed preview migration", expected: true },
+    { name: "unconfirmed adoption", expected: false },
+    { name: "another source message", expected: false },
+    { name: "another source channel", expected: false },
+    { name: "another account", expected: false },
+    { name: "another target", expected: false },
+    { name: "contradictory thread", expected: false },
+    { name: "another provider", expected: false },
+    { name: "closed route", expected: false },
+  ])("proves adopted-thread send ownership only for $name", async ({ name, expected }) => {
+    const sessionKey = "agent:main:discord:channel:100000";
+    const onThreadAdoptionError = vi.fn();
+    const end = beginDiscordActiveTurnThreadRoute(sessionKey, {
+      accountId: "default",
+      sourceChannelId: "100000",
+      sourceMessageId: "300000",
+      onThreadAdopted: async () => {
+        if (name === "failed preview migration") {
+          throw new Error("synthetic preview migration failure");
+        }
+      },
+      onThreadAdoptionError,
+    });
+    try {
+      if (name !== "unconfirmed adoption") {
+        await notifyDiscordActiveTurnThreadCreated({
+          sessionKey,
+          accountId: "default",
+          sourceChannelId: "100000",
+          sourceMessageId: "300000",
+          threadId: "200000",
+        });
+      }
+      if (name === "closed route") {
+        end();
+      }
+      const matches =
+        discordMessageActions.messageActionTargetAliases?.send?.matchesCurrentConversation;
+      expect(
+        matches?.({
+          args: {
+            target: name === "another target" ? "channel:200001" : "channel:200000",
+            ...(name === "contradictory thread" ? { threadId: "200001" } : {}),
+          },
+          accountId: name === "another account" ? "other" : "default",
+          toolContext: {
+            currentChannelProvider: name === "another provider" ? "slack" : "discord",
+            currentChannelId: name === "another source channel" ? "100001" : "100000",
+            currentMessageId: name === "another source message" ? "300001" : "300000",
+          },
+        }),
+      ).toBe(expected);
+      expect(onThreadAdoptionError).toHaveBeenCalledTimes(
+        name === "failed preview migration" ? 1 : 0,
+      );
+    } finally {
+      end();
+    }
+  });
+
   it("returns no tool actions when no token-sourced Discord accounts are enabled", () => {
     withEnv({ DISCORD_BOT_TOKEN: undefined }, () => {
       const discovery = discordMessageActions.describeMessageTool?.({
